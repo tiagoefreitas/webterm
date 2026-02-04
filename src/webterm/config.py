@@ -26,6 +26,7 @@ class App(BaseModel):
     command: ExpandVarsStr = ""
     terminal: bool = False
     theme: str | None = None
+    group: str = ""
 
 
 class Config(BaseModel):

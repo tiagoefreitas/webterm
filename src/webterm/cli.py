@@ -56,6 +56,12 @@ def _package_version() -> str:
     help='Watch Docker for containers with "webterm-command" label and add/remove sessions dynamically.',
 )
 @click.option(
+    "--tmux-watch",
+    "tmux_watch",
+    is_flag=True,
+    help="Watch local tmux sessions/windows and add/remove sessions dynamically.",
+)
+@click.option(
     "--theme",
     "-t",
     help="Terminal color theme (xterm, monokai, dark, light, dracula, catppuccin, nord, gruvbox, solarized, tokyo).",
@@ -81,6 +87,7 @@ def app(
     landing_manifest: Path | None,
     compose_manifest: Path | None,
     docker_watch: bool,
+    tmux_watch: bool,
     theme: str,
     font_family: str | None,
     font_size: int,
@@ -95,6 +102,7 @@ def app(
         webterm                           # Serve default shell
         webterm htop                      # Serve htop in terminal
         webterm --docker-watch            # Watch Docker for labeled containers
+        webterm --tmux-watch              # Watch local tmux sessions/windows
     """
     VERSION = _package_version()
     log.info("webterm v%s", VERSION)
@@ -109,6 +117,7 @@ def app(
     landing_apps: list = []
     is_compose_mode = False
     is_docker_watch_mode = docker_watch
+    is_tmux_watch_mode = tmux_watch
     compose_project: str | None = None
     if landing_manifest:
         landing_apps = load_landing_yaml(landing_manifest)
@@ -127,6 +136,7 @@ def app(
         compose_mode=is_compose_mode,
         compose_project=compose_project,
         docker_watch_mode=is_docker_watch_mode,
+        tmux_watch_mode=is_tmux_watch_mode,
         theme=theme,
         font_family=font_family,
         font_size=font_size,
@@ -137,6 +147,8 @@ def app(
         # Run command as terminal
         server.add_terminal("Terminal", command, "")
         log.info("Serving terminal: %s", command)
+    elif tmux_watch:
+        log.info("tmux watch mode enabled - sessions will be added dynamically")
     elif docker_watch:
         # Docker watch mode - sessions added dynamically
         log.info("Docker watch mode enabled - sessions will be added dynamically")

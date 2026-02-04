@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import contextlib
 import hashlib
 import json
@@ -345,6 +346,15 @@ def _format_command_label(command: str) -> str:
     return command
 
 
+def _format_tile(app) -> dict[str, str]:
+    return {
+        "slug": app.slug,
+        "name": app.name,
+        "command": _format_command_label(app.command),
+        "group": getattr(app, "group", ""),
+    }
+
+
 class LocalServer:
     def mark_route_activity(self, route_key: str) -> None:
         try:
@@ -406,6 +416,7 @@ class LocalServer:
         compose_mode: bool = False,
         compose_project: str | None = None,
         docker_watch_mode: bool = False,
+        tmux_watch_mode: bool = False,
         theme: str = "xterm",
         font_family: str | None = None,
         font_size: int = 16,
@@ -436,6 +447,7 @@ class LocalServer:
         self._compose_mode = compose_mode
         self._compose_project = compose_project
         self._docker_watch_mode = docker_watch_mode
+        self._tmux_watch_mode = tmux_watch_mode
 
         self._screenshot_cache: dict[str, tuple[float, str]] = {}
         self._screenshot_cache_etag: dict[str, str] = {}
@@ -450,24 +462,36 @@ class LocalServer:
         self._docker_stats: DockerStatsCollector | None = None
         # Docker watcher (only used in docker watch mode)
         self._docker_watcher = None
+        # tmux watcher (only used in tmux watch mode)
+        self._tmux_watcher = None
         self._slug_to_service: dict[str, str] = {}
+        self._tmux_extra_added = False
 
     @property
     def app_count(self) -> int:
         return len(self.session_manager.apps)
 
-    def add_app(self, name: str, command: str, slug: str = "", theme: str | None = None) -> None:
+    def add_app(
+        self, name: str, command: str, slug: str = "", theme: str | None = None, group: str = ""
+    ) -> None:
         slug = slug or generate().lower()
-        self.session_manager.add_app(name, command, slug=slug, theme=theme)
+        self.session_manager.add_app(name, command, slug=slug, theme=theme, group=group)
 
     def add_terminal(
-        self, name: str, command: str, slug: str = "", theme: str | None = None
+        self,
+        name: str,
+        command: str,
+        slug: str = "",
+        theme: str | None = None,
+        group: str = "",
     ) -> None:
         if constants.WINDOWS:
             log.warning("Sorry, webterm does not currently support terminals on Windows")
             return
         slug = slug or generate().lower()
-        self.session_manager.add_app(name, command, slug=slug, terminal=True, theme=theme)
+        self.session_manager.add_app(
+            name, command, slug=slug, terminal=True, theme=theme, group=group
+        )
 
     async def run(self) -> None:
         try:
@@ -610,12 +634,35 @@ class LocalServer:
                 await self._docker_watcher.start()
                 stack.push_async_callback(self._docker_watcher.stop)
 
+            # Start tmux watcher in tmux watch mode
+            if self._tmux_watch_mode:
+                from .tmux_watcher import TmuxWatcher
+
+                if not self._tmux_extra_added:
+                    shell_cmd = os.environ.get("SHELL", "/bin/sh")
+                    self.add_terminal(
+                        "Local Shell",
+                        shell_cmd,
+                        slug="local-shell",
+                        group="local",
+                    )
+                    self._tmux_extra_added = True
+
+                self._tmux_watcher = TmuxWatcher(
+                    self.session_manager,
+                    on_change=self._on_tmux_change,
+                )
+                await self._tmux_watcher.start()
+                stack.push_async_callback(self._tmux_watcher.stop)
+
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
 
             log.info("Local server started on %s:%s", self.host, self.port)
             if self._docker_watch_mode:
                 log.info("Docker watch mode: sessions added dynamically from labeled containers")
+            elif self._tmux_watch_mode:
+                log.info("tmux watch mode: sessions added dynamically from local tmux")
             else:
                 log.info(
                     "Available apps: %s", ", ".join(app.name for app in self.session_manager.apps)
@@ -648,6 +695,9 @@ class LocalServer:
         # Notify SSE subscribers about dashboard change
         self._notify_activity("__dashboard__")
 
+    def _on_tmux_change(self) -> None:
+        """Callback when tmux windows change."""
+        self._notify_activity("__dashboard__")
     async def _handle_stdin(
         self, envelope: list, route_key: str, _ws: web.WebSocketResponse
     ) -> None:
@@ -1003,39 +1053,36 @@ class LocalServer:
 
     async def _handle_tiles(self, request: web.Request) -> web.Response:
         """Return current tiles as JSON (for dynamic dashboard updates)."""
-        if self._docker_watch_mode:
+        if self._docker_watch_mode or self._tmux_watch_mode:
             apps_for_dashboard = self.session_manager.apps
         else:
             apps_for_dashboard = self._landing_apps
 
-        tiles = [
-            {"slug": app.slug, "name": app.name, "command": _format_command_label(app.command)}
-            for app in apps_for_dashboard
-        ]
+        tiles = [_format_tile(app) for app in apps_for_dashboard]
         return web.json_response(tiles)
 
     async def _handle_root(self, request: web.Request) -> web.Response:
         route_key_param = request.query.get("route_key")
 
-        # Show dashboard if we have landing apps, are in docker watch mode, or explicitly have apps
-        show_dashboard = (self._landing_apps or self._docker_watch_mode) and not route_key_param
+        # Show dashboard if we have landing apps, are in docker/tmux watch mode
+        show_dashboard = (
+            self._landing_apps or self._docker_watch_mode or self._tmux_watch_mode
+        ) and not route_key_param
 
         if show_dashboard:
-            # In docker watch mode, use session_manager.apps (dynamically updated)
+            # In docker/tmux watch mode, use session_manager.apps (dynamically updated)
             # Otherwise use landing_apps
-            if self._docker_watch_mode:
+            if self._docker_watch_mode or self._tmux_watch_mode:
                 apps_for_dashboard = self.session_manager.apps
             else:
                 apps_for_dashboard = self._landing_apps
 
-            tiles = [
-                {"slug": app.slug, "name": app.name, "command": _format_command_label(app.command)}
-                for app in apps_for_dashboard
-            ]
+            tiles = [_format_tile(app) for app in apps_for_dashboard]
             tiles_json = json.dumps(tiles)
             # Show CPU sparklines in both compose mode and docker watch mode
             compose_mode_js = "true" if (self._compose_mode or self._docker_watch_mode) else "false"
             docker_watch_js = "true" if self._docker_watch_mode else "false"
+            tmux_watch_js = "true" if self._tmux_watch_mode else "false"
             html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1048,7 +1095,10 @@ class LocalServer:
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 16px; background: #0f172a; color: #e2e8f0; }}
         h1 {{ margin-bottom: 8px; }}
         .subtitle {{ color: #64748b; font-size: 14px; margin-bottom: 16px; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
+        .grid {{ display: flex; flex-direction: column; gap: 24px; }}
+        .group {{ display: flex; flex-direction: column; gap: 12px; }}
+        .group-title {{ font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #94a3b8; }}
+        .group-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
         .tile {{ background: #1e293b; border: 1px solid #334155; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.4); cursor: pointer; transition: border-color 0.15s; }}
         .tile:hover {{ border-color: #475569; }}
         .tile.selected {{ border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.3); }}
@@ -1093,6 +1143,7 @@ class LocalServer:
         let tiles = {tiles_json};
         const composeMode = {compose_mode_js};
         const dockerWatchMode = {docker_watch_js};
+        const tmuxWatchMode = {tmux_watch_js};
         let cardsBySlug = {{}};
 
         // Typeahead search state
@@ -1103,6 +1154,12 @@ class LocalServer:
         const keyIndicatorEl = document.getElementById('key-indicator');
         const thumbnailCache = {{}};
         const THUMBNAIL_TTL_MS = 5000;
+
+        const basePath = window.location.pathname.replace(/\\/$/, '');
+        function apiPath(path) {{
+            if (!basePath || basePath === '/') return path;
+            return `${{basePath}}${{path}}`;
+        }}
 
         function makeTile(tile) {{
             const card = document.createElement('div');
@@ -1145,19 +1202,61 @@ class LocalServer:
         const grid = document.getElementById('grid');
         const subtitle = document.getElementById('subtitle');
 
+        function groupTiles(list) {{
+            const groups = [];
+            const seen = new Map();
+            list.forEach(tile => {{
+                const key = (tile.group || '').trim();
+                if (!seen.has(key)) {{
+                    const group = {{ name: key, tiles: [] }};
+                    seen.set(key, group);
+                    groups.push(group);
+                }}
+                seen.get(key).tiles.push(tile);
+            }});
+            return groups;
+        }}
+
         function renderTiles() {{
             grid.innerHTML = '';
             cardsBySlug = {{}};
             if (tiles.length === 0) {{
-                grid.innerHTML = '<div class="empty">No containers found. Start containers with the webterm-command label.</div>';
-                subtitle.textContent = dockerWatchMode ? 'Watching for containers with webterm-command label...' : '';
+                if (tmuxWatchMode) {{
+                    grid.innerHTML = '<div class="empty">No tmux sessions found. Start tmux to populate the dashboard.</div>';
+                    subtitle.textContent = 'Watching for tmux sessions...';
+                }} else {{
+                    grid.innerHTML = '<div class="empty">No containers found. Start containers with the webterm-command label.</div>';
+                    subtitle.textContent = dockerWatchMode ? 'Watching for containers with webterm-command label...' : '';
+                }}
                 return;
             }}
-            subtitle.textContent = dockerWatchMode ? `${{tiles.length}} container(s) found` : '';
-            tiles.forEach(tile => {{
-                const card = makeTile(tile);
-                grid.appendChild(card);
-                cardsBySlug[tile.slug] = card;
+
+            if (tmuxWatchMode) {{
+                const sessions = new Set(tiles.map(t => (t.group || '').trim()).filter(Boolean));
+                subtitle.textContent = `${{tiles.length}} window(s) in ${{sessions.size}} session(s)`;
+            }} else {{
+                subtitle.textContent = dockerWatchMode ? `${{tiles.length}} container(s) found` : '';
+            }}
+
+            const groups = groupTiles(tiles);
+            groups.forEach(group => {{
+                const section = document.createElement('div');
+                section.className = 'group';
+                if (group.name) {{
+                    const title = document.createElement('div');
+                    title.className = 'group-title';
+                    title.textContent = group.name;
+                    section.appendChild(title);
+                }}
+                const groupGrid = document.createElement('div');
+                groupGrid.className = 'group-grid';
+                group.tiles.forEach(tile => {{
+                    const card = makeTile(tile);
+                    groupGrid.appendChild(card);
+                    cardsBySlug[tile.slug] = card;
+                }});
+                section.appendChild(groupGrid);
+                grid.appendChild(section);
             }});
             refreshAll();
         }}
@@ -1168,23 +1267,8 @@ class LocalServer:
         // Typeahead search functions
         function openTile(tile) {{
             if (!tile || !tile.slug) return;
-            const url = `/?route_key=${{encodeURIComponent(tile.slug)}}`;
-            const target = `webterm-${{tile.slug}}`;
-            let win = window.open(url, target);
-            if (!win) {{
-                window.location.href = url;
-                return;
-            }}
-            if (win.closed) {{
-                win = window.open(url, target);
-            }}
-            if (win) {{
-                if (typeof win.focus === 'function') {{
-                    win.focus();
-                }}
-            }} else {{
-                window.location.href = url;
-            }}
+            const url = apiPath(`/?route_key=${{encodeURIComponent(tile.slug)}}`);
+            window.location.href = url;
             // Dismiss typeahead after launching from floating results.
             searchQuery = '';
             activeResultIndex = -1;
@@ -1200,7 +1284,9 @@ class LocalServer:
         }}
 
         function getTileCommand(tile) {{
-            return tile.command || '';
+            const group = tile.group ? `${{tile.group}}` : '';
+            if (group && tile.command) return `${{group}} • ${{tile.command}}`;
+            return tile.command || group || '';
         }}
 
         function getThumbnailSrc(tile) {{
@@ -1209,7 +1295,7 @@ class LocalServer:
             const now = Date.now();
             const existing = thumbnailCache[slug];
             if (!existing || (now - existing.updatedAt) > THUMBNAIL_TTL_MS) {{
-                const src = `/screenshot.svg?route_key=${{encodeURIComponent(slug)}}&_t=${{now}}`;
+                const src = apiPath(`/screenshot.svg?route_key=${{encodeURIComponent(slug)}}&_t=${{now}}`);
                 thumbnailCache[slug] = {{ src, updatedAt: now }};
                 return src;
             }}
@@ -1233,7 +1319,8 @@ class LocalServer:
                 const name = normalizeText(t.name);
                 const command = normalizeText(t.command);
                 const slug = normalizeText(t.slug);
-                return name.includes(query) || command.includes(query) || slug.includes(query);
+                const group = normalizeText(t.group);
+                return name.includes(query) || command.includes(query) || slug.includes(query) || group.includes(query);
             }});
 
             // Build header
@@ -1374,112 +1461,19 @@ class LocalServer:
         function refreshTile(slug) {{
             const card = cardsBySlug[slug];
             if (!card) return;
-            card.img.src = `/screenshot.svg?route_key=${{encodeURIComponent(slug)}}&_t=${{Date.now()}}`;
+            card.img.src = apiPath(`/screenshot.svg?route_key=${{encodeURIComponent(slug)}}&_t=${{Date.now()}}`);
         }}
 
         // Refresh all screenshots (initial load)
         function refreshAll() {{
             for (const tile of tiles) {{
                 const card = cardsBySlug[tile.slug];
-                if (card) card.img.src = `/screenshot.svg?route_key=${{encodeURIComponent(tile.slug)}}`;
-            }}
-        }}
-
-        // Fetch updated tiles list from server
-        async function refreshTilesList() {{
-            try {{
-                const resp = await fetch('/tiles');
-                const newTiles = await resp.json();
-                // Check if tiles changed
-                const oldSlugs = tiles.map(t => t.slug).sort().join(',');
-                const newSlugs = newTiles.map(t => t.slug).sort().join(',');
-                if (oldSlugs !== newSlugs) {{
-                    tiles = newTiles;
-                    renderTiles();
-                }}
-            }} catch (e) {{
-                console.error('Failed to refresh tiles:', e);
-            }}
-        }}
-
-        // Refresh sparklines periodically (CPU stats don't need SSE)
-        function refreshSparklines() {{
-            if (!composeMode) return;
-            for (const tile of tiles) {{
-                const card = cardsBySlug[tile.slug];
-                if (card && card.sparkline) {{
-                    card.sparkline.src = `/cpu-sparkline.svg?container=${{encodeURIComponent(tile.slug)}}&width=80&height=16&_t=${{Date.now()}}`;
+                if (card) card.img.src = apiPath(`/screenshot.svg?route_key=${{encodeURIComponent(tile.slug)}}`);
+                if (composeMode && card && card.sparkline) {{
+                    card.sparkline.src = apiPath(`/cpu-sparkline.svg?container=${{encodeURIComponent(tile.slug)}}&width=80&height=16`);
                 }}
             }}
         }}
-
-        // SSE connection for real-time screenshot updates
-        let eventSource = null;
-        let sparklineTimer = null;
-        // Debounce tracking per tile
-        const pendingRefresh = {{}};
-        const lastRefresh = {{}};
-        const REFRESH_DEBOUNCE_MS = 500;  // Min 0.5s between refreshes per tile
-
-        function scheduleRefreshTile(slug) {{
-            const now = Date.now();
-            const last = lastRefresh[slug] || 0;
-            // If we refreshed recently, schedule for later
-            if (now - last < REFRESH_DEBOUNCE_MS) {{
-                if (!pendingRefresh[slug]) {{
-                    pendingRefresh[slug] = setTimeout(() => {{
-                        pendingRefresh[slug] = null;
-                        refreshTile(slug);
-                    }}, REFRESH_DEBOUNCE_MS - (now - last));
-                }}
-                return;
-            }}
-            refreshTile(slug);
-            lastRefresh[slug] = now;
-        }}
-
-        function startSSE() {{
-            if (eventSource) return;
-            eventSource = new EventSource('/events');
-            eventSource.addEventListener('activity', (e) => {{
-                const slug = e.data;
-                // Special event for dashboard changes (container added/removed)
-                if (slug === '__dashboard__') {{
-                    refreshTilesList();
-                }} else {{
-                    scheduleRefreshTile(slug);
-                }}
-            }});
-            eventSource.onerror = () => {{
-                // Reconnect on error
-                eventSource.close();
-                eventSource = null;
-                setTimeout(startSSE, 2000);
-            }};
-            // Start sparkline polling (every 30s since it's 30min history)
-            if (composeMode && !sparklineTimer) {{
-                refreshSparklines();
-                sparklineTimer = setInterval(refreshSparklines, 30000);
-            }}
-        }}
-
-        function stopSSE() {{
-            if (eventSource) {{
-                eventSource.close();
-                eventSource = null;
-            }}
-            if (sparklineTimer) {{
-                clearInterval(sparklineTimer);
-                sparklineTimer = null;
-            }}
-        }}
-
-        document.addEventListener('visibilitychange', () => {{
-            if (document.hidden) stopSSE();
-            else startSSE();
-        }});
-
-        if (!document.hidden) startSSE();
     </script>
 </body>
 </html>"""
@@ -1514,13 +1508,12 @@ class LocalServer:
         if route_key is None:
             route_key = RouteKey(generate().lower())
 
-        ws_url = self._get_ws_url_from_request(request, route_key)
         page_title = available_app.name if available_app else "Webterm"
 
         # Build data attributes for terminal configuration
         theme = available_app.theme or self.theme
         data_attrs = (
-            f'data-session-websocket-url="{ws_url}" data-font-size="{self.font_size}" '
+            f'data-route-key="{route_key}" data-font-size="{self.font_size}" '
             f'data-scrollback="1000" data-theme="{theme}"'
         )
         font_family = self.font_family or "var(--webterm-mono)"
@@ -1535,7 +1528,7 @@ class LocalServer:
 <html>
 <head>
     <title>{page_title}</title>
-    <link rel=\"stylesheet\" href=\"/static/monospace.css\">
+    <link rel=\"stylesheet\" href=\"static/monospace.css\">
     <style>
       html, body {{ width: 100%; height: 100%; }}
       body {{ background: {theme_bg}; margin: 0; padding: 0; overflow: hidden; font-family: var(--webterm-mono); }}
@@ -1544,7 +1537,19 @@ class LocalServer:
 </head>
 <body>
     <div id=\"terminal\" class=\"webterm-terminal\" {data_attrs}></div>
-    <script type=\"module\" src=\"/static/js/terminal.js\"></script>
+    <script>
+      (function() {{
+        const el = document.getElementById('terminal');
+        if (!el) return;
+        const routeKey = el.dataset.routeKey || '';
+        const basePath = window.location.pathname.replace(/\\/$/, '');
+        const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        const wsPath = `${{basePath}}/ws/${{encodeURIComponent(routeKey)}}`;
+        const wsUrl = `${{wsProto}}://${{window.location.host}}${{wsPath}}`;
+        el.dataset.sessionWebsocketUrl = wsUrl;
+      }})();
+    </script>
+    <script type=\"module\" src=\"static/js/terminal.js\"></script>
 </body>
 </html>"""
         return web.Response(text=html_content, content_type="text/html")

@@ -46,6 +46,7 @@ class SessionManager:
         slug: str,
         terminal: bool = False,
         theme: str | None = None,
+        group: str = "",
     ) -> None:
         """Add a new app
 
@@ -56,7 +57,13 @@ class SessionManager:
         """
         slug = slug or generate().lower()
         new_app = config.App(
-            name=name, slug=slug, path="./", command=command, terminal=terminal, theme=theme
+            name=name,
+            slug=slug,
+            path="./",
+            command=command,
+            terminal=terminal,
+            theme=theme,
+            group=group,
         )
         self.apps.append(new_app)
         self.apps_by_slug[slug] = new_app

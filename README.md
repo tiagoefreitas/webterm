@@ -142,6 +142,17 @@ services:
 
 **Requires**: Docker socket access (`-v /var/run/docker.sock:/var/run/docker.sock`)
 
+### tmux Watch Mode (No Docker Required)
+
+Expose local tmux sessions/windows in the dashboard:
+
+```bash
+webterm --tmux-watch
+```
+
+Each tmux window becomes a tile, grouped by session in the dashboard, and opens with:
+`tmux attach-session -t <session>:<window>`.
+
 ### Docker Compose Integration
 
 Point to a docker-compose file; services with the label `webterm-command` become tiles (and `webterm-theme` applies there too):
@@ -189,6 +200,7 @@ Options:
                                 "webterm-command" become landing tiles.
   -D, --docker-watch            Watch Docker for containers with
                                 "webterm-command" label (dynamic mode).
+  --tmux-watch                  Watch local tmux sessions/windows (dynamic mode).
   -t, --theme TEXT              Terminal color theme [default: xterm]
                                 Options: xterm, monokai, dark, light, dracula,
                                 catppuccin, nord, gruvbox, solarized, tokyo
