@@ -10,7 +10,6 @@ import json
 import logging
 import re
 import signal
-import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -353,8 +352,6 @@ def _format_tile(app) -> dict[str, str]:
         "name": app.name,
         "command": _format_command_label(app.command),
         "group": getattr(app, "group", ""),
-        "tmux_session": getattr(app, "tmux_session", ""),
-        "tmux_window": getattr(app, "tmux_window", ""),
     }
 
 
@@ -475,25 +472,10 @@ class LocalServer:
         return len(self.session_manager.apps)
 
     def add_app(
-        self,
-        name: str,
-        command: str,
-        slug: str = "",
-        theme: str | None = None,
-        group: str = "",
-        tmux_session: str = "",
-        tmux_window: str = "",
+        self, name: str, command: str, slug: str = "", theme: str | None = None, group: str = ""
     ) -> None:
         slug = slug or generate().lower()
-        self.session_manager.add_app(
-            name,
-            command,
-            slug=slug,
-            theme=theme,
-            group=group,
-            tmux_session=tmux_session,
-            tmux_window=tmux_window,
-        )
+        self.session_manager.add_app(name, command, slug=slug, theme=theme, group=group)
 
     def add_terminal(
         self,
@@ -502,22 +484,13 @@ class LocalServer:
         slug: str = "",
         theme: str | None = None,
         group: str = "",
-        tmux_session: str = "",
-        tmux_window: str = "",
     ) -> None:
         if constants.WINDOWS:
             log.warning("Sorry, webterm does not currently support terminals on Windows")
             return
         slug = slug or generate().lower()
         self.session_manager.add_app(
-            name,
-            command,
-            slug=slug,
-            terminal=True,
-            theme=theme,
-            group=group,
-            tmux_session=tmux_session,
-            tmux_window=tmux_window,
+            name, command, slug=slug, terminal=True, theme=theme, group=group
         )
 
     async def run(self) -> None:
@@ -588,7 +561,6 @@ class LocalServer:
             web.get("/events", self._handle_sse),
             web.get("/health", self._handle_health_check),
             web.get("/tiles", self._handle_tiles),
-            web.post("/tmux/action", self._handle_tmux_action),
             web.get("/", self._handle_root),
         ]
 
@@ -1089,45 +1061,6 @@ class LocalServer:
         tiles = [_format_tile(app) for app in apps_for_dashboard]
         return web.json_response(tiles)
 
-    async def _handle_tmux_action(self, request: web.Request) -> web.Response:
-        if not self._tmux_watch_mode:
-            return web.json_response({"ok": False, "error": "tmux not enabled"}, status=400)
-        try:
-            payload = await request.json()
-        except Exception:
-            return web.json_response({"ok": False, "error": "invalid json"}, status=400)
-        action = payload.get("action", "")
-        session = payload.get("tmux_session", "")
-        window = payload.get("tmux_window", "")
-
-        if action == "new_window":
-            if session:
-                cmd = ["tmux", "new-window", "-t", session]
-            else:
-                cmd = ["tmux", "new-session", "-d"]
-        elif action == "new_session":
-            cmd = ["tmux", "new-session", "-d"]
-        elif action == "close_window":
-            if not session or not window:
-                return web.json_response({"ok": False, "error": "missing tmux target"}, status=400)
-            cmd = ["tmux", "kill-window", "-t", f"{session}:{window}"]
-        elif action == "close_session":
-            if not session:
-                return web.json_response({"ok": False, "error": "missing tmux target"}, status=400)
-            cmd = ["tmux", "kill-session", "-t", session]
-        else:
-            return web.json_response({"ok": False, "error": "unknown action"}, status=400)
-
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return web.json_response(
-            {
-                "ok": result.returncode == 0,
-                "code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            }
-        )
-
     async def _handle_root(self, request: web.Request) -> web.Response:
         route_key_param = request.query.get("route_key")
 
@@ -1156,7 +1089,6 @@ class LocalServer:
     <title>Session Dashboard</title>
     <link rel="manifest" href="/static/manifest.json">
     <meta name="theme-color" content="#0d1117">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <link rel="icon" href="/static/icons/webterm-192.png" sizes="192x192">
     <link rel="apple-touch-icon" href="/static/icons/webterm-192.png">
     <style>
@@ -1577,11 +1509,6 @@ class LocalServer:
             route_key = RouteKey(generate().lower())
 
         page_title = available_app.name if available_app else "Webterm"
-        if self._docker_watch_mode or self._tmux_watch_mode:
-            apps_for_nav = self.session_manager.apps
-        else:
-            apps_for_nav = self._landing_apps
-        tiles_json = json.dumps([_format_tile(app) for app in apps_for_nav])
 
         # Build data attributes for terminal configuration
         theme = available_app.theme or self.theme
@@ -1601,108 +1528,25 @@ class LocalServer:
 <html>
 <head>
     <title>{page_title}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <link rel=\"stylesheet\" href=\"static/monospace.css\">
     <style>
-      html, body {{ width: 100%; height: 100%; height: 100dvh; }}
+      html, body {{ width: 100%; height: 100%; }}
       body {{ background: {theme_bg}; margin: 0; padding: 0; overflow: hidden; font-family: var(--webterm-mono); }}
-      .webterm-terminal {{ width: 100%; height: 100%; display: block; overflow: hidden; padding-bottom: var(--webterm-keybar-height, 0px); box-sizing: border-box; }}
-      .topbar {{ position: fixed; top: 0; left: 0; right: 0; height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 8px; background: rgba(15, 15, 15, 0.9); border-bottom: 1px solid rgba(255,255,255,0.08); z-index: 10001; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }}
-      .topbar::-webkit-scrollbar {{ display: none; }}
-      .topbar button {{ height: 26px; padding: 0 8px; border: 1px solid #444; border-radius: 6px; background: #1f1f1f; color: #e5e5e5; font-size: 13px; min-width: 30px; }}
-      .topbar .spacer {{ flex: 1; }}
-      .topbar .title {{ font-size: 12px; color: #9ca3af; }}
-      .terminal-wrap {{ position: absolute; top: var(--webterm-topbar-height, 38px); left: 0; right: 0; bottom: 0; }}
+      .webterm-terminal {{ width: 100%; height: 100%; display: block; overflow: hidden; }}
     </style>
 </head>
 <body>
-    <div class=\"topbar\">
-      <button id=\"btn-dashboard\" title=\"Dashboard\">⌂</button>
-      <button id=\"btn-prev\" title=\"Previous\">◀</button>
-      <button id=\"btn-next\" title=\"Next\">▶</button>
-      <span class=\"title\" id=\"title\"></span>
-      <span class=\"spacer\"></span>
-      <button id=\"btn-new-window\" title=\"New Window\">⊞</button>
-      <button id=\"btn-new-session\" title=\"New Session\">⊕</button>
-      <button id=\"btn-close-window\" title=\"Close Window\">⊟</button>
-      <button id=\"btn-close-session\" title=\"Close Session\">⊖</button>
-    </div>
-    <div class=\"terminal-wrap\">
-      <div id=\"terminal\" class=\"webterm-terminal\" {data_attrs}></div>
-    </div>
+    <div id=\"terminal\" class=\"webterm-terminal\" {data_attrs}></div>
     <script>
       (function() {{
         const el = document.getElementById('terminal');
         if (!el) return;
-        const topbar = document.querySelector('.topbar');
-        if (topbar) {{
-          const h = Math.round(topbar.getBoundingClientRect().height);
-          document.documentElement.style.setProperty('--webterm-topbar-height', `${{h}}px`);
-        }}
         const routeKey = el.dataset.routeKey || '';
         const basePath = window.location.pathname.replace(/\\/$/, '');
         const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const wsPath = `${{basePath}}/ws/${{encodeURIComponent(routeKey)}}`;
         const wsUrl = `${{wsProto}}://${{window.location.host}}${{wsPath}}`;
         el.dataset.sessionWebsocketUrl = wsUrl;
-
-        const tiles = {tiles_json};
-        const currentIndex = tiles.findIndex(t => t.slug === routeKey);
-        const titleEl = document.getElementById('title');
-        if (titleEl && currentIndex >= 0) {{
-          titleEl.textContent = tiles[currentIndex].name || tiles[currentIndex].slug;
-        }}
-
-        const apiPath = (path) => {{
-          if (!basePath || basePath === '/') return path;
-          return `${{basePath}}${{path}}`;
-        }};
-
-        const goToIndex = (idx) => {{
-          if (idx < 0 || idx >= tiles.length) return;
-          const slug = tiles[idx].slug;
-          window.location.href = apiPath(`/?route_key=${{encodeURIComponent(slug)}}`);
-        }};
-
-        const dashboardBtn = document.getElementById('btn-dashboard');
-        if (dashboardBtn) {{
-          dashboardBtn.onclick = () => window.location.href = apiPath('/');
-        }}
-        const prevBtn = document.getElementById('btn-prev');
-        if (prevBtn) {{
-          prevBtn.onclick = () => goToIndex((currentIndex - 1 + tiles.length) % tiles.length);
-        }}
-        const nextBtn = document.getElementById('btn-next');
-        if (nextBtn) {{
-          nextBtn.onclick = () => goToIndex((currentIndex + 1) % tiles.length);
-        }}
-
-        async function tmuxAction(action) {{
-          const tile = tiles[currentIndex] || {{}};
-          const payload = {{
-            action,
-            tmux_session: tile.tmux_session || '',
-            tmux_window: tile.tmux_window || '',
-          }};
-          try {{
-            await fetch(apiPath('/tmux/action'), {{
-              method: 'POST',
-              headers: {{ 'Content-Type': 'application/json' }},
-              body: JSON.stringify(payload),
-            }});
-          }} catch (e) {{
-            console.error('tmux action failed', e);
-          }}
-        }}
-
-        const btnNewWindow = document.getElementById('btn-new-window');
-        if (btnNewWindow) btnNewWindow.onclick = () => tmuxAction('new_window');
-        const btnNewSession = document.getElementById('btn-new-session');
-        if (btnNewSession) btnNewSession.onclick = () => tmuxAction('new_session');
-        const btnCloseWindow = document.getElementById('btn-close-window');
-        if (btnCloseWindow) btnCloseWindow.onclick = () => tmuxAction('close_window');
-        const btnCloseSession = document.getElementById('btn-close-session');
-        if (btnCloseSession) btnCloseSession.onclick = () => tmuxAction('close_session');
       }})();
     </script>
     <script type=\"module\" src=\"static/js/terminal.js\"></script>

@@ -47,8 +47,6 @@ class SessionManager:
         terminal: bool = False,
         theme: str | None = None,
         group: str = "",
-        tmux_session: str = "",
-        tmux_window: str = "",
     ) -> None:
         """Add a new app
 
@@ -66,8 +64,6 @@ class SessionManager:
             terminal=terminal,
             theme=theme,
             group=group,
-            tmux_session=tmux_session,
-            tmux_window=tmux_window,
         )
         self.apps.append(new_app)
         self.apps_by_slug[slug] = new_app

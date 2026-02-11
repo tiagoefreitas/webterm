@@ -124,8 +124,6 @@ class TmuxWatcher:
                     app.name = name
                     app.command = command
                     app.group = group
-                    app.tmux_session = window["session"]
-                    app.tmux_window = window["index"]
                 continue
 
             self._managed_windows[slug] = window["window_id"]
@@ -135,8 +133,6 @@ class TmuxWatcher:
                 slug=slug,
                 terminal=True,
                 group=group,
-                tmux_session=window["session"],
-                tmux_window=window["index"],
             )
 
         # Remove windows that disappeared

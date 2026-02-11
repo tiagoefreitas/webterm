@@ -406,14 +406,6 @@ function isMobileDevice(): boolean {
   );
 }
 
-function getResponsiveMobileFontSize(): number {
-  const width = Math.min(window.innerWidth, window.innerHeight);
-  if (width <= 360) return 9;
-  if (width <= 400) return 10;
-  if (width <= 480) return 11;
-  return 12;
-}
-
 const SHIFT_KEY_MAP: Record<string, string> = {
   "`": "~",
   "1": "!",
@@ -569,22 +561,6 @@ class WebTerminal {
   private pendingFn = false;
   private fontFamily: string;
   private fontSize: number;
-  private touchScrollActive = false;
-  private touchSelectActive = false;
-  private touchStartX = 0;
-  private touchStartY = 0;
-  private touchLastY = 0;
-  private touchSelectTimer: number | null = null;
-  private pinchStartDistance = 0;
-  private pinchStartFontSize = 0;
-  private pinchActive = false;
-  private keybarDragging = false;
-  private keybarDraggedRecently = false;
-  private keybarScrollTarget: HTMLElement | null = null;
-  private customButtons: { label: string; combo: string }[] = [];
-  private keybarDragStartX = 0;
-  private keybarDragStartScroll = 0;
-  private keybarTapTarget: HTMLElement | null = null;
 
   private constructor(
     container: HTMLElement,
@@ -624,9 +600,7 @@ class WebTerminal {
     const themeToUse = config.theme ?? THEMES.tango;
     console.log("[webterm:create] Theme to use (config.theme ?? THEMES.xterm):", JSON.stringify(themeToUse, null, 2));
     const fontFamily = config.fontFamily?.trim() || DEFAULT_FONT_FAMILY;
-    const fontSize =
-      config.fontSize ??
-      (isMobileDevice() ? getResponsiveMobileFontSize() : 16);
+    const fontSize = config.fontSize ?? 16;
 
     const options: ITerminalOptions = {
       fontFamily,
@@ -686,7 +660,6 @@ class WebTerminal {
   /** Initialize event handlers and connect */
   private initialize(): void {
     console.log("[webterm:init] initialize() called");
-    this.element.style.touchAction = "none";
     
     // Check canvas state immediately
     const canvas = this.element.querySelector("canvas");
@@ -771,15 +744,11 @@ class WebTerminal {
     // Setup mobile keyboard support
     this.setupMobileKeyboard();
     this.setupTouchSelection();
-    this.setupTouchScroll();
-    this.setupPinchToZoom();
 
     // Setup mobile extended keybar (only on mobile devices)
     if (isMobileDevice()) {
       this.setupMobileKeybar();
     }
-
-    this.setupMobileViewportResize();
 
     // Connect WebSocket
     this.connect();
@@ -1078,19 +1047,7 @@ class WebTerminal {
       "touchstart",
       (e) => {
         if (e.touches.length !== 1) return;
-        if (this.pinchActive) return;
-        if (this.touchSelectTimer) window.clearTimeout(this.touchSelectTimer);
-        this.touchSelectActive = false;
-        this.touchScrollActive = false;
-        this.touchStartX = e.touches[0].clientX;
-        this.touchStartY = e.touches[0].clientY;
-        this.touchLastY = this.touchStartY;
-        // Long-press to start selection
-        this.touchSelectTimer = window.setTimeout(() => {
-          if (this.touchScrollActive || this.pinchActive) return;
-          this.touchSelectActive = true;
-          dispatchMouse("mousedown", e.touches[0]);
-        }, 300);
+        dispatchMouse("mousedown", e.touches[0]);
         e.preventDefault();
       },
       { passive: false }
@@ -1100,21 +1057,7 @@ class WebTerminal {
       "touchmove",
       (e) => {
         if (e.touches.length !== 1) return;
-        if (this.pinchActive) return;
-        const touch = e.touches[0];
-        const deltaX = touch.clientX - this.touchStartX;
-        const deltaY = touch.clientY - this.touchStartY;
-        const moved = Math.abs(deltaX) + Math.abs(deltaY);
-        if (!this.touchSelectActive && moved > 6) {
-          this.touchScrollActive = true;
-          if (this.touchSelectTimer) {
-            window.clearTimeout(this.touchSelectTimer);
-            this.touchSelectTimer = null;
-          }
-        }
-        if (this.touchSelectActive) {
-          dispatchMouse("mousemove", touch);
-        }
+        dispatchMouse("mousemove", e.touches[0]);
         e.preventDefault();
       },
       { passive: false }
@@ -1125,92 +1068,10 @@ class WebTerminal {
       (e) => {
         const touch = e.changedTouches[0];
         if (!touch) return;
-        if (this.touchSelectTimer) {
-          window.clearTimeout(this.touchSelectTimer);
-          this.touchSelectTimer = null;
-        }
-        if (this.touchSelectActive) {
-          dispatchMouse("mouseup", touch);
-        }
-        this.touchSelectActive = false;
-        this.touchScrollActive = false;
+        dispatchMouse("mouseup", touch);
         e.preventDefault();
       },
       { passive: false }
-    );
-  }
-
-  private setupTouchScroll(): void {
-    const canvas = this.element.querySelector("canvas");
-    if (!canvas) return;
-
-    canvas.addEventListener(
-      "touchmove",
-      (e) => {
-        if (e.touches.length !== 1) return;
-        if (this.pinchActive || this.touchSelectActive) return;
-        const touch = e.touches[0];
-        const deltaY = touch.clientY - this.touchLastY;
-        this.touchLastY = touch.clientY;
-        const lineHeight = this.getLineHeight();
-        if (!lineHeight) return;
-        const lines = Math.round(deltaY / lineHeight);
-        if (lines !== 0) {
-          // Finger down => scroll up (negative)
-          this.terminal.scrollLines(-lines);
-        }
-        e.preventDefault();
-      },
-      { passive: false }
-    );
-  }
-
-  private setupPinchToZoom(): void {
-    const canvas = this.element.querySelector("canvas");
-    if (!canvas) return;
-
-    const distance = (t1: Touch, t2: Touch) => {
-      const dx = t2.clientX - t1.clientX;
-      const dy = t2.clientY - t1.clientY;
-      return Math.hypot(dx, dy);
-    };
-
-    canvas.addEventListener(
-      "touchstart",
-      (e) => {
-        if (e.touches.length !== 2) return;
-        this.pinchActive = true;
-        this.pinchStartDistance = distance(e.touches[0], e.touches[1]);
-        this.pinchStartFontSize = this.fontSize;
-        if (this.touchSelectTimer) {
-          window.clearTimeout(this.touchSelectTimer);
-          this.touchSelectTimer = null;
-        }
-        e.preventDefault();
-      },
-      { passive: false }
-    );
-
-    canvas.addEventListener(
-      "touchmove",
-      (e) => {
-        if (!this.pinchActive || e.touches.length !== 2) return;
-        const current = distance(e.touches[0], e.touches[1]);
-        if (!this.pinchStartDistance) return;
-        const scale = current / this.pinchStartDistance;
-        const target = Math.round(this.pinchStartFontSize * scale);
-        this.setFontSize(target);
-        e.preventDefault();
-      },
-      { passive: false }
-    );
-
-    canvas.addEventListener(
-      "touchend",
-      () => {
-        this.pinchActive = false;
-      },
-      { passive: true }
     );
   }
 
@@ -1219,7 +1080,7 @@ class WebTerminal {
     const keybar = document.createElement("div");
     keybar.className = "mobile-keybar";
     keybar.innerHTML = `
-      <button data-action="config" title="Customize">⚙︎</button>
+      <button class="keybar-drag" title="Drag to move">⋮⋮</button>
       <button data-key="\\x1b" title="Escape">Esc</button>
       <button data-modifier="ctrl" title="Ctrl modifier">Ctrl</button>
       <button data-modifier="alt" title="Alt modifier">Alt</button>
@@ -1230,7 +1091,7 @@ class WebTerminal {
       <button data-key="\\x1b[B" title="Down">↓</button>
       <button data-key="\\x1b[D" title="Left">←</button>
       <button data-key="\\x1b[C" title="Right">→</button>
-      <button data-key="\\x0d" title="Return">⏎</button>
+      <button data-key="\\x0d" title="Return" class="keybar-return">⏎</button>
     `;
 
     // Inject styles
@@ -1238,43 +1099,32 @@ class WebTerminal {
     style.textContent = `
       .mobile-keybar {
         position: fixed;
-        left: 6px;
-        right: 6px;
-        bottom: calc(6px + var(--webterm-keybar-offset, 0px) + env(keyboard-inset-height, 0px));
-        display: flex;
-        gap: 6px;
-        padding: 6px 8px;
-        background: rgba(30, 30, 30, 0.96);
-        border-radius: 10px;
+        bottom: 80px;
+        right: 0;
+        display: grid;
+        grid-template-columns: repeat(6, auto);
+        gap: 4px;
+        padding: 6px;
+        background: rgba(40, 40, 40, 0.95);
+        border-radius: 8px 0 0 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.3);
         z-index: 10000;
-        overflow-x: auto;
-        overflow-y: hidden;
-        -webkit-overflow-scrolling: touch;
-        touch-action: pan-x;
+        touch-action: none;
         user-select: none;
         -webkit-user-select: none;
       }
-      .mobile-keybar.dragging button {
-        pointer-events: none;
-      }
       .mobile-keybar button {
-        flex: 0 0 auto;
         min-width: 36px;
-        height: 30px;
-        padding: 0 10px;
+        height: 32px;
+        padding: 0 8px;
         border: 1px solid #555;
-        border-radius: 6px;
-        background: #2b2b2b;
+        border-radius: 4px;
+        background: #333;
         color: #eee;
-        font-size: 11px;
+        font-size: 13px;
         font-family: system-ui, sans-serif;
         cursor: pointer;
-        touch-action: pan-x;
-      }
-      .mobile-keybar button[data-action="config"] {
-        background: #1f2937;
-        border-color: #374151;
+        touch-action: manipulation;
       }
       .mobile-keybar button:active {
         background: #555;
@@ -1283,182 +1133,28 @@ class WebTerminal {
         background: #0066cc;
         border-color: #0088ff;
       }
-      .mobile-keybar::-webkit-scrollbar {
-        display: none;
+      .mobile-keybar .keybar-drag {
+        min-width: 24px;
+        padding: 0 4px;
+        cursor: grab;
+        color: #888;
       }
-      .keybar-config {
-        position: fixed;
-        left: 12px;
-        right: 12px;
-        bottom: calc(48px + var(--webterm-keybar-offset, 0px) + env(keyboard-inset-height, 0px));
-        background: rgba(20, 20, 20, 0.95);
-        border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 10px;
-        padding: 12px;
-        color: #e5e7eb;
-        z-index: 10002;
+      .mobile-keybar .keybar-drag:active {
+        cursor: grabbing;
       }
-      .keybar-config.hidden {
-        display: none;
-      }
-      .keybar-config h4 {
-        margin: 0 0 8px 0;
-        font-size: 12px;
-        color: #9ca3af;
-      }
-      .keybar-config .row {
-        display: flex;
-        gap: 6px;
-        margin-bottom: 8px;
-      }
-      .keybar-config input {
-        flex: 1;
-        background: #111827;
-        border: 1px solid #374151;
-        color: #e5e7eb;
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 12px;
-      }
-      .keybar-config button {
-        background: #1f2937;
-        border: 1px solid #374151;
-        color: #e5e7eb;
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 12px;
-      }
-      .keybar-config .list {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        max-height: 140px;
-        overflow-y: auto;
-      }
-      .keybar-config .item {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        justify-content: space-between;
-        background: #0f172a;
-        border: 1px solid #1f2937;
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 12px;
-      }
-      .keybar-config .item span {
-        color: #cbd5f5;
+      .mobile-keybar .keybar-return {
+        grid-column: 6;
+        grid-row: 2;
       }
     `;
     document.head.appendChild(style);
     document.body.appendChild(keybar);
     this.mobileKeybar = keybar;
-    this.setupKeybarHorizontalScroll(keybar);
-    if (isMobileDevice()) {
-      this.setupMobileViewportResize();
-    }
-
-    const configPanel = document.createElement("div");
-    configPanel.className = "keybar-config hidden";
-    configPanel.innerHTML = `
-      <h4>Custom Buttons</h4>
-      <div class="row">
-        <input id="kb-label" placeholder="Label (e.g. Ctrl+B)" />
-        <input id="kb-combo" placeholder="Combo (e.g. ctrl+b)" />
-        <button id="kb-add">Add</button>
-      </div>
-      <div class="list" id="kb-list"></div>
-    `;
-    document.body.appendChild(configPanel);
-
-    const storageKey = "webterm.customButtons";
-    const loadCustom = (): { label: string; combo: string }[] => {
-      try {
-        const raw = localStorage.getItem(storageKey);
-        const data = raw ? JSON.parse(raw) : [];
-        if (Array.isArray(data)) {
-          return data.filter((b) => b && b.label && b.combo);
-        }
-      } catch {
-        // ignore
-      }
-      return [];
-    };
-    const saveCustom = (list: { label: string; combo: string }[]) => {
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(list));
-      } catch {
-        // ignore
-      }
-    };
-
-    const renderCustomButtons = () => {
-      // Remove existing custom buttons
-      keybar.querySelectorAll("button[data-custom='1']").forEach((btn) => btn.remove());
-      this.customButtons.forEach((btn) => {
-        const b = document.createElement("button");
-        b.dataset.custom = "1";
-        b.dataset.combo = btn.combo;
-        b.textContent = btn.label;
-        b.title = btn.combo;
-        b.addEventListener("click", () => this.sendCombo(btn.combo));
-        keybar.appendChild(b);
-      });
-      const list = configPanel.querySelector("#kb-list") as HTMLElement;
-      if (!list) return;
-      list.innerHTML = "";
-      this.customButtons.forEach((btn, idx) => {
-        const row = document.createElement("div");
-        row.className = "item";
-        const label = document.createElement("span");
-        label.textContent = `${btn.label} (${btn.combo})`;
-        const del = document.createElement("button");
-        del.textContent = "Remove";
-        del.addEventListener("click", () => {
-          this.customButtons.splice(idx, 1);
-          saveCustom(this.customButtons);
-          renderCustomButtons();
-        });
-        row.appendChild(label);
-        row.appendChild(del);
-        list.appendChild(row);
-      });
-    };
-
-    this.customButtons = loadCustom();
-    renderCustomButtons();
-
-    const cfgBtn = keybar.querySelector("button[data-action='config']");
-    if (cfgBtn) {
-      cfgBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        configPanel.classList.toggle("hidden");
-      });
-    }
-    configPanel.addEventListener("click", (e) => e.stopPropagation());
-    document.addEventListener("click", () => {
-      configPanel.classList.add("hidden");
-    });
-
-    const addBtn = configPanel.querySelector("#kb-add") as HTMLButtonElement | null;
-    const labelInput = configPanel.querySelector("#kb-label") as HTMLInputElement | null;
-    const comboInput = configPanel.querySelector("#kb-combo") as HTMLInputElement | null;
-    if (addBtn && labelInput && comboInput) {
-      addBtn.addEventListener("click", () => {
-        const label = labelInput.value.trim();
-        const combo = comboInput.value.trim().toLowerCase();
-        if (!label || !combo) return;
-        this.customButtons.push({ label, combo });
-        saveCustom(this.customButtons);
-        labelInput.value = "";
-        comboInput.value = "";
-        renderCustomButtons();
-      });
-    }
 
     // Handle key button presses
     keybar.querySelectorAll("button[data-key]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("touchstart", (e) => {
+        e.preventDefault();
         let key = (btn as HTMLElement).dataset.key || "";
         // Unescape the key sequences
         key = key.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
@@ -1509,7 +1205,8 @@ class WebTerminal {
 
     // Handle modifier toggles
     keybar.querySelectorAll("button[data-modifier]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("touchstart", (e) => {
+        e.preventDefault();
         const modifier = (btn as HTMLElement).dataset.modifier;
         if (modifier === "ctrl") {
           this.ctrlActive = !this.ctrlActive;
@@ -1532,182 +1229,57 @@ class WebTerminal {
       });
     });
 
-    // No drag: horizontal scroll only
+    // Setup drag functionality
+    this.setupKeybarDrag(keybar);
   }
 
-  private sendCombo(combo: string): void {
-    const seq = this.comboToSequence(combo);
-    if (!seq) return;
-    this.send(["stdin", seq]);
-    this.deactivateModifiers();
-  }
+  /** Make the keybar draggable */
+  private setupKeybarDrag(keybar: HTMLElement): void {
+    const dragHandle = keybar.querySelector(".keybar-drag") as HTMLElement;
+    if (!dragHandle) return;
 
-  private comboToSequence(combo: string): string | null {
-    const parts = combo
-      .split("+")
-      .map((p) => p.trim().toLowerCase())
-      .filter(Boolean);
-    if (parts.length === 0) return null;
-    const key = parts.pop() as string;
-    const mods = new Set(parts);
-    const useCtrl = mods.has("ctrl") || mods.has("control");
-    const useShift = mods.has("shift");
-    const useAlt = mods.has("alt") || mods.has("option");
-    const useFn = mods.has("fn");
-
-    const applyAlt = (seq: string) => (useAlt ? applyAltModifier(seq) : seq);
-
-    if (key === "tab") {
-      const seq = useShift ? "\x1b[Z" : "\t";
-      return applyAlt(seq);
-    }
-    if (key === "enter" || key === "return") {
-      return applyAlt("\r");
-    }
-    if (key === "esc" || key === "escape") {
-      return applyAlt("\x1b");
-    }
-    if (key === "backspace" || key === "bs") {
-      return applyAlt("\x7f");
-    }
-    if (key === "delete" || key === "del") {
-      return applyAlt("\x1b[3~");
-    }
-
-    const arrowMap: Record<string, string> = {
-      up: "A",
-      down: "B",
-      right: "C",
-      left: "D",
-    };
-    if (key in arrowMap) {
-      const dir = arrowMap[key];
-      let seq = `\x1b[${dir}`;
-      if (useCtrl && useShift) {
-        seq = `\x1b[1;6${dir}`;
-      } else if (useCtrl) {
-        seq = `\x1b[1;5${dir}`;
-      } else if (useShift) {
-        seq = `\x1b[1;2${dir}`;
-      }
-      return applyAlt(seq);
-    }
-
-    const keyMap: Record<string, string> = {
-      home: "\x1b[H",
-      end: "\x1b[F",
-      pageup: "\x1b[5~",
-      pagedown: "\x1b[6~",
-    };
-    if (key in keyMap) {
-      return applyAlt(keyMap[key]);
-    }
-
-    if (key.length === 1) {
-      return applyModifiers(key, useShift, useCtrl, useAlt, useFn);
-    }
-    return null;
-  }
-
-  private setupKeybarHorizontalScroll(keybar: HTMLElement): void {
-    keybar.addEventListener(
-      "click",
-      (e) => {
-        if (this.keybarDraggedRecently) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
-      },
-      { capture: true }
-    );
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startRight = 0;
+    let startBottom = 0;
 
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
-      this.keybarDragging = false;
-      this.keybarDraggedRecently = false;
-      this.keybarDragStartX = e.touches[0].clientX;
-      this.keybarDragStartScroll = keybar.scrollLeft;
-      this.keybarTapTarget = (e.target as HTMLElement)?.closest("button") || null;
-      this.keybarScrollTarget = keybar;
-      keybar.classList.remove("dragging");
+      isDragging = true;
+      const touch = e.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+
+      const rect = keybar.getBoundingClientRect();
+      startRight = window.innerWidth - rect.right;
+      startBottom = window.innerHeight - rect.bottom;
+
       e.preventDefault();
     };
 
     const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length !== 1) return;
-      const dx = e.touches[0].clientX - this.keybarDragStartX;
-      if (!this.keybarDragging && Math.abs(dx) > 6) {
-        this.keybarDragging = true;
-        this.keybarDraggedRecently = true;
-        this.keybarTapTarget = null;
-        keybar.classList.add("dragging");
-      }
-      if (this.keybarDragging) {
-        keybar.scrollLeft = this.keybarDragStartScroll - dx;
-        e.preventDefault();
-        e.stopPropagation();
-      }
+      if (!isDragging || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const deltaX = startX - touch.clientX;
+      const deltaY = startY - touch.clientY;
+
+      const newRight = Math.max(0, Math.min(window.innerWidth - 100, startRight + deltaX));
+      const newBottom = Math.max(0, Math.min(window.innerHeight - 50, startBottom + deltaY));
+
+      keybar.style.right = `${newRight}px`;
+      keybar.style.bottom = `${newBottom}px`;
+
+      e.preventDefault();
     };
 
     const onTouchEnd = () => {
-      if (!this.keybarDragging && this.keybarTapTarget) {
-        this.keybarTapTarget.click();
-      }
-      this.keybarDragging = false;
-      this.keybarTapTarget = null;
-      this.keybarScrollTarget = null;
-      keybar.classList.remove("dragging");
-      if (this.keybarDraggedRecently) {
-        window.setTimeout(() => {
-          this.keybarDraggedRecently = false;
-        }, 250);
-      }
+      isDragging = false;
     };
 
-    keybar.addEventListener("touchstart", onTouchStart, { passive: false, capture: true });
-    keybar.addEventListener("touchmove", onTouchMove, { passive: false, capture: true });
-    keybar.addEventListener("touchend", onTouchEnd, { passive: true, capture: true });
-    document.addEventListener("touchmove", (e) => {
-      if (!this.keybarScrollTarget) return;
-      if (!keybar.contains(e.target as Node)) return;
-      onTouchMove(e);
-    }, { passive: false, capture: true });
-  }
-
-  private setupMobileViewportResize(): void {
-    if (!isMobileDevice() || !window.visualViewport) return;
-    const viewport = window.visualViewport;
-    const vk = (navigator as unknown as { virtualKeyboard?: { overlaysContent: boolean } })
-      .virtualKeyboard;
-    if (vk) {
-      try {
-        vk.overlaysContent = true;
-      } catch {
-        // ignore
-      }
-    }
-    const update = () => {
-      const height = Math.round(viewport.height);
-      const offset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
-      document.documentElement.style.height = `${height}px`;
-      document.body.style.height = `${height}px`;
-      if (this.mobileKeybar) {
-        const keybarHeight = Math.round(this.mobileKeybar.getBoundingClientRect().height);
-        this.element.style.height = `${height}px`;
-        this.element.style.paddingBottom = `${keybarHeight + 6}px`;
-        document.documentElement.style.setProperty(
-          "--webterm-keybar-height",
-          `${keybarHeight}px`
-        );
-      } else {
-        this.element.style.height = `${height}px`;
-      }
-      document.documentElement.style.setProperty("--webterm-keybar-offset", `${offset}px`);
-      this.fit();
-    };
-    viewport.addEventListener("resize", update);
-    viewport.addEventListener("scroll", update);
-    update();
+    dragHandle.addEventListener("touchstart", onTouchStart, { passive: false });
+    document.addEventListener("touchmove", onTouchMove, { passive: false });
+    document.addEventListener("touchend", onTouchEnd);
   }
 
   /** Deactivate all modifiers */
@@ -1741,32 +1313,6 @@ class WebTerminal {
     } catch {
       // Ignore font loading errors
     }
-  }
-
-  private getLineHeight(): number | null {
-    const renderer = this.terminal.renderer;
-    if (renderer && typeof renderer.getMetrics === "function") {
-      const metrics = renderer.getMetrics();
-      if (metrics && metrics.height > 0) return metrics.height;
-    }
-    const measured = this.measureCellSize();
-    return measured ? measured.height : null;
-  }
-
-  private setFontSize(size: number): void {
-    const minSize = isMobileDevice() ? 12 : 10;
-    const maxSize = isMobileDevice() ? 22 : 28;
-    const next = Math.max(minSize, Math.min(maxSize, size));
-    if (next === this.fontSize) return;
-    this.fontSize = next;
-    this.terminal.options.fontSize = next;
-    if (this.terminal.renderer && typeof this.terminal.renderer.setFontSize === "function") {
-      this.terminal.renderer.setFontSize(next);
-    }
-    if (typeof (this.terminal as unknown as { loadFonts?: () => void }).loadFonts === "function") {
-      (this.terminal as unknown as { loadFonts: () => void }).loadFonts();
-    }
-    this.fit();
   }
 
   /** 

@@ -27,8 +27,6 @@ class App(BaseModel):
     terminal: bool = False
     theme: str | None = None
     group: str = ""
-    tmux_session: str = ""
-    tmux_window: str = ""
 
 
 class Config(BaseModel):
